@@ -9,24 +9,29 @@ DB_NAME="zabixdb"
 DAYS_TO_KEEP=90
 
 # Construct the SQL queries
-QUERY_HISTORY_UINT="DELETE FROM history_uint WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY));"
-QUERY_HISTORY="DELETE FROM history WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY));"
-QUERY_TRENDS_UINT="DELETE FROM trends_uint WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY));"
-QUERY_TRENDS="DELETE FROM trends WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY));"
-QUERY_EVENTS="DELETE FROM events WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY));"
-QUERY_ALERTS="DELETE FROM alerts WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY));"
+QUERY_HISTORY_UINT="DELETE FROM history_uint WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY)) LIMIT 5000;"
+QUERY_HISTORY="DELETE FROM history WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY)) LIMIT 5000;"
+QUERY_TRENDS_UINT="DELETE FROM trends_uint WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY)) LIMIT 5000;"
+QUERY_TRENDS="DELETE FROM trends WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY)) LIMIT 5000;"
+QUERY_EVENTS="DELETE FROM events WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY)) LIMIT 5000;"
+QUERY_ALERTS="DELETE FROM alerts WHERE clock < UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL $DAYS_TO_KEEP DAY)) LIMIT 5000;"
 
 # Function to execute a SQL query and track progress
 execute_query() {
   local query="$1"
   local query_name="$2"
+  local row_count=$(mysql -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -s -e "SELECT COUNT(*) FROM ($query) AS subquery;")
   echo "Executing $query_name..."
-  mysql -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -e "$query"
-  local exit_code=$?
-  if [ $exit_code -eq 0 ]; then
-    echo "$query_name executed successfully."
+  if [ "$row_count" -gt 1000 ]; then
+    mysql -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -e "$query"
+    local exit_code=$?
+    if [ $exit_code -eq 0 ]; then
+      echo "$query_name executed successfully. Rows deleted: $row_count"
+    else
+      echo "Error executing $query_name. Exit code: $exit_code"
+    fi
   else
-    echo "Error executing $query_name. Exit code: $exit_code"
+    echo "Skipping $query_name. Row count is less than or equal to 1000: $row_count"
   fi
 }
 
