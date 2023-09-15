@@ -1,0 +1,348 @@
+---
+
+- name: zabix info gather
+  #connection: ansible.netcommon.network_cli
+  #gather_facts: false
+  vars:
+    ansible_user : user
+    ansible_connection : ssh
+    ansible_host_key_checking : false
+    ansible_ssh_common_args : "-o StrictHostKeyChecking=no"
+    ansible_remote_tmp: "/tmp/.ansible/tmp"
+    ansible_ssh_pass : pass
+    ansible_sudo_pass : pass
+    inv_csv : "Invfile"
+    become : yes
+    unins : no
+  hosts: all
+  tasks:
+
+
+  - name: Collect hardware info
+    when: use_cache is not defined
+    block:
+
+    - name: Update facts cache
+      setup:
+
+ 
+    - name: Create raw YAML
+      copy: 
+        content: | 
+          {% for host in ansible_play_hosts %}
+          {{ hostvars[host].ansible_facts | to_nice_yaml }}
+          {% endfor %}
+        dest: /tmp/systems.yml
+      delegate_to: localhost
+      run_once: true
+    tags :
+      - invyml
+
+  - name: Create CSV log entry
+    set_fact:
+      csv_entry: >-
+        {{ ansible_hostname|upper }},
+        {{ ansible_date_time.date }} {{ ansible_date_time.time }},
+        {{ ansible_fqdn }},
+        {{ ansible_distribution_version }},
+        {{ ansible_architecture }},
+        {{ ansible_board_vendor }},
+        {{ ansible_default_ipv4.alias }},
+        {{ ansible_default_ipv4.address }},
+        {{ ansible_system_vendor |replace(',',' ') }},
+        {{ ansible_processor[1] }},
+        {{ (ansible_memtotal_mb/1024)|round|int }}GB,
+        {{ ansible_product_name }},
+        {{ ansible_bios_version }},
+        {{ ansible_bios_date }},
+    vars:
+      unknown_disks:  # Stub disk to avoid errors/workarounds
+      - system_disk: yes
+        physical_disk:
+          bus_type: ''
+          media_type: ''
+          model: ''
+          size: 0
+          firmware_version: ''
+      disk: '{{ (ansible_facts.disks|default(unknown_disks)|selectattr("system_disk")|first).physical_disk }}'
+    tags :
+      - inv
+
+  # - name: Add or update changes to systems.csv
+  #   lineinfile:
+  #     line: '{{ csv_entry }}'
+  #     regexp: '; "{{ ansible_hostname|upper }}";'
+  #     dest: "{{ inv_csv }}"
+  #     state: present
+  #     create: yes
+  #   delegate_to: localhost
+ 
+  - name: Add system changes to systems-log.csv
+    lineinfile:
+      line: '{{ csv_entry }}'
+      regexp: '^{{ ansible_hostname|upper }},*.*'
+      dest: "{{ inv_csv }}"
+      state: present
+      create: yes
+      mode: u=rw,g=rw,o=rw
+    delegate_to: localhost
+    tags :
+      - inv
+
+# Add Header Row to CSV #
+  - name: Header Row
+    lineinfile:
+      regexp: '^Hostname,OS,*.*'
+      dest: "{{ inv_csv }}"
+      insertbefore: BOF
+      line: Hostname,OS,Major Version,Version,Architecture,Connection Names,Interface Names,IPv4 Address,IPv6 Address,Default Gateway,MAC Address,Last Boot,Total Memory (MB),Processors,Processor Cores,Product Name
+      state: present
+      create: yes
+    delegate_to: localhost
+    run_once: true 
+    tags :
+      - invhdr
+
+  - name: Ansible copy file to remote server
+    copy:
+      src: ./zabbix-release_6.0-1+ubuntu18.04_all.deb
+      dest: /tmp/zabbix-release_6.0-1+ubuntu18.04_all.deb
+    tags :
+      - insad
+
+  - name: add repo for  Zabbix agent
+    #yum:
+    apt: 
+      deb: /tmp/zabbix-release_6.0-1+ubuntu18.04_all.deb 
+      state : present
+    become: yes
+    tags :
+      - insad
+    ignore_errors: yes
+
+
+  - name: firewall enable 
+    #yum:
+    shell: |
+      ufw allow 10050/tcp 
+      ufw allow 10051/tcp
+      ufw allow 3535/tcp
+      ufw allow 3535/udp
+      ufw allow 514/tcp 
+      ufw allow 514/udp 
+      ufw allow 22/tcp 
+    become: yes
+    tags: 
+      - fw
+
+  - name: Install the Zabbix agent
+    #yum:
+    shell: |
+      apt install zabbix-agent -y
+    become: yes
+    tags : 
+      - ins
+
+  # - name: UNInstall the Zabbix agent
+  #   #yum:
+  #   shell: |
+  #     apt purge  zabbix-agent -y  && rm -rf /etc/zabbix /var/log/zabbix
+  #   become: yes
+  #   tags: 
+  #     - unins
+  #   #when: unins == yes 
+  #   ignore_errors: yes
+
+
+  - name: Remove file (delete file)
+    ansible.builtin.file:
+      path: /tmp/zabbix-release_6.0-1+ubuntu18.04_all.deb 
+      state: absent
+    tags :
+        - ins
+
+
+
+  - name: config the agent
+    #yum:
+    shell: |
+      echo """PidFile=/run/zabbix/zabbix_agentd.pid
+      LogFile=/var/log/zabbix/zabbix_agentd.log
+      LogFileSize=10
+      Server={{ servers }}
+      ServerActive={{ servers }}
+      Hostname={{ansible_hostname}}""" > /etc/zabbix/zabbix_agentd.conf && \
+      chmod 666 /etc/zabbix/zabbix_agentd.conf && \
+      mkdir -p /var/log/zabbix/ && \
+      touch /var/log/zabbix/zabbix_agentd.log && chmod 666 /var/log/zabbix/zabbix_agentd.log
+    become: yes
+    tags :
+        - conf
+
+
+
+
+
+  - name: stop the Zabbix agent service
+    service:
+      name: zabbix-agent
+      state: stopped
+      enabled: yes
+    become: yes
+    tags :
+        - stp
+
+
+  - name: Start the Zabbix agent service
+    service:
+      name: zabbix-agent
+      state: started
+      enabled: yes
+    become: yes
+    tags :
+        - strt
+
+
+  - name: config the syslog 
+    #yum:
+    shell: |
+      echo """\$ModLoad imfile
+      \$InputFilePollInterval 10 
+      \$InputFileName /var/log/zabbix/zabbix_agentd.log
+      \$InputFileTag zabbix-agent-log
+      \$InputFileStateFile zabbix-agent-log
+      \$InputFileSeverity info
+      \$InputFileFacility local7
+      \$InputRunFileMonitor
+
+      *.* @@{{ syslogserver }}:3535""" > /etc/rsyslog.d/40-zabbix-agent-logs.conf && chmod 666 /etc/rsyslog.d/40-zabbix-agent-logs.conf
+    become: yes
+    tags :
+        - rsys
+
+  - name: restart rsyslog
+    ansible.builtin.service:
+      name: rsyslog
+      state: restarted
+    when:
+      - not ansible_check_mode
+    become: yes
+    tags :
+        - rsys
+
+  - name: Create a new host or update an existing host's info
+    local_action:
+      module: community.zabbix.zabbix_host
+      server_url: https://{{ zabbix_servers }}/
+      login_user: user
+      login_password: pass
+      host_name: "{{ ansible_hostname  }}"    #"{{ item.split(',')[0] }}" #'{{ item.hostname }}'
+      inventory_mode: automatic  #manual   #automatic
+      inventory_zabbix:
+        alias :  "{{ inventory_hostname }}"
+        # asset_tag :  
+        chassis :  "{{ ansible_form_factor }}"
+        # contact :  
+        # contract_number :  
+        # date_hw_decomm :  
+        # date_hw_expiry :  
+        # date_hw_install :  
+        # date_hw_purchase :  
+        # deployment_status :  
+        hardware :  "{{ ansible_processor[1] }} - {{ ansible_processor[2] }} - cores {{ ansible_processor_cores }}  - vcpu {{ ansible_processor_nproc }} - RAM {{ (ansible_memtotal_mb/1024)|round|int }}GB"
+        hardware_full :  "kernel {{ ansible_kernel }}" 
+        # host_netmask :  
+        # host_networks :  
+        # host_router :  
+        hw_arch :  "{{ ansible_architecture }}  - {{ ansible_userspace_bits }} bits"
+        # installer_name :  
+        # location :  
+        # location_lat :  
+        # location_lon :  
+        macaddress_a :  "{{ ansible_default_ipv4.macaddress }}"
+        # macaddress_b :  
+        # model :  {{ (ansible_memtotal_mb/1024)|round|int }}GB
+        name :  "{{ ansible_hostname }}"
+        # notes :  
+        oob_ip :  "{{ ansible_default_ipv4.alias }} with {{ ansible_default_ipv4.address }}"
+        #oob_netmask :  ''    #"{{ ansible_default_ipv4.alias }}"
+        # oob_router :  
+        # os :  
+        # os_full :  
+        os_short : "{{ ansible_lsb.description }} - {{ ansible_distribution_release }}"
+        # poc_1_cell :  
+        # poc_1_email :  
+        # poc_1_name :  
+        # poc_1_notes :  
+        # poc_1_phone_a :  
+        # poc_1_phone_b :  
+        # poc_1_screen :  
+        # poc_2_cell :  
+        # poc_2_email :  
+        # poc_2_name :  
+        # poc_2_notes :  
+        # poc_2_phone_a :  
+        # poc_2_phone_b :  
+        # poc_2_screen :  
+        # serialno_a :  
+        # serialno_b :  
+        # site_address_a :  
+        # site_address_b :  
+        # site_address_c :  
+        # site_city :  
+        # site_country :  
+        # site_notes :  
+        # site_rack :  
+        # site_state :  
+        # site_zip :  
+        # software :  
+        # software_app_a : 
+        # software_app_b :  
+        # software_app_c :  
+        # software_app_d :  
+        # software_app_e :  
+        # software_full :  
+        # tag :  
+        # type :  
+        # type_full :  
+        # url_a :  
+        # url_b :  
+        # url_c :  
+        vendor : "{{ ansible_bios_vendor }} - {{ ansible_board_vendor }}"
+        # tag: "{{ number.value_2 }}"
+        # alias: "{{ number.alias }}"
+        # name: "{{ number.name}}"
+        # notes: "Special Informations: {{ your_informations | default('None') }}"
+        # location: "{{ your_location }}"
+        # site_rack: "{{ your_site_rack }}"
+        # os: "{{ your_os }}"
+        # hardware: "{{ your_hardware }}"
+        # serialno_a: "{{ number.serialno_a }}"
+        # oob_ip: "{{number.oob_ip}}"
+        type: "{{ ansible_system_vendor  | replace (',',' ') }}" 
+      host_groups:
+         - 	SPLUNK-devices
+      #   - Linux servers
+      #  - "Cyber Security"
+      #  - Azure - Cluster Kubernetes
+      link_templates:
+        - Linux by Zabbix agent active
+      interfaces:
+        - type: 1
+          main: 1
+          useip: 1
+          ip: "{{ ansible_default_ipv4.address }}" # '{{item.ip}}'
+          dns: ""
+          port: 10050
+      #tls_accept: 2
+      #tls_connect: 2
+      #tls_psk: 
+      #tls_psk_identity: PSK02
+      #tls_connect: 2
+      #tls_psk: 
+    #with_items: "{{ results.stdout_lines }}"
+      #delegate_to: localhost
+    # with_items:
+    tags :
+        - add
+        - after
